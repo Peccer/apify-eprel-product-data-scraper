@@ -11,16 +11,14 @@ async def main():
         actor_input = await Actor.get_input() or {}
         start_urls = actor_input.get("startUrls", [{"url": "https://eprel.ec.europa.eu/screen/product/refrigeratingappliances2019"}])
         max_results = actor_input.get("maxResults", 100)
-        proxy_config = actor_input.get("proxyConfiguration", {"useApifyProxy": True})
 
         Actor.log.info(f"Starting EPREL Scraper for {len(start_urls)} URLs.")
 
         async with async_playwright() as p:
             # 2. Setup browser and proxy
-            proxy_url = await Actor.create_proxy_configuration(actor_proxy_config=proxy_config)
             browser = await p.chromium.launch(
                 headless=Actor.config.headless,
-                proxy={"server": proxy_url.server_url} if proxy_url else None
+                proxy={"server": None}
             )
             
             context = await browser.new_context(
