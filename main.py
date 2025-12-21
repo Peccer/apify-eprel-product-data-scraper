@@ -1,6 +1,7 @@
 import asyncio
 from typing import Dict, Any, List
 from urllib.parse import urljoin
+from datetime import datetime, timezone
 
 from playwright.async_api import async_playwright
 from apify import Actor
@@ -14,10 +15,14 @@ async def main():
 
         Actor.log.info(f"Starting EPREL Scraper for {len(start_urls)} URLs.")
 
+        # Get the environment to check for headless mode
+        actor_env = Actor.get_env()
+
         async with async_playwright() as p:
             # 2. Setup browser and proxy
+            # REPLACED: Actor.config.headless -> actor_env.get('headless')
             browser = await p.chromium.launch(
-                headless=Actor.config.headless,
+                headless=actor_env.get('headless', True),
                 proxy={"server": None}
             )
             
@@ -40,7 +45,6 @@ async def main():
                     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     
                     # Handle EPREL's dynamic loading
-                    # If it's a listing page, we need to extract product links
                     if "/screen/product/" not in url:
                         Actor.log.info("Interpreting URL as a search/listing page...")
                         await page.wait_for_selector(".product-item-title", timeout=15000)
@@ -107,6 +111,10 @@ async def scrape_product_page(page, url) -> Dict[str, Any]:
         pis_link = await page.get_attribute("a[href*='productInformationSheet']", "href")
         label_link = await page.get_attribute("a[href*='energyLabel']", "href")
         
+        # REPLACED: Actor.config.start_at -> actor_env.started_at
+        actor_env = Actor.get_env()
+        scraped_at = actor_env.started_at.isoformat() if actor_env.started_at else datetime.now(timezone.utc).isoformat()
+
         return {
             "url": url,
             "modelIdentifier": model_id.strip(),
@@ -115,7 +123,7 @@ async def scrape_product_page(page, url) -> Dict[str, Any]:
             "productInformationSheet": urljoin(url, pis_link) if pis_link else None,
             "energyLabelPdf": urljoin(url, label_link) if label_link else None,
             "specifications": params,
-            "scrapedAt": Actor.config.start_at.isoformat()
+            "scrapedAt": scraped_at
         }
     except Exception as e:
         Actor.log.warning(f"Could not scrape product {url}: {str(e)}")
