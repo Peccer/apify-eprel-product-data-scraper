@@ -22,8 +22,7 @@ async def main():
             # 2. Setup browser and proxy
             # REPLACED: Actor.config.headless -> actor_env.get('headless')
             browser = await p.chromium.launch(
-                headless=actor_env.get('headless', True),
-                proxy={"server": None}
+                headless=actor_env.get('headless', True)
             )
             
             context = await browser.new_context(
