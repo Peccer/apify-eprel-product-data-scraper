@@ -1,0 +1,13 @@
+{
+    "actorSpecification": 1,
+    "name": "eprel-product-data-scraper",
+    "title": "EPREL Product Energy Label Scraper",
+    "description": "Extracts detailed energy efficiency data, product sheets (PIS), and energy labels from the official EU EPREL database.",
+    "version": "0.1",
+    "buildTag": "latest",
+    "dockerfile": "./Dockerfile",
+    "input": "./INPUT_SCHEMA.json",
+    "readme": "./README.md",
+    "minMemoryMbytes": 2048,
+    "maxMemoryMbytes": 4096
+}
