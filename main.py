@@ -10,11 +10,12 @@ async def main():
     async with Actor:
         # 1. Initialize input
         actor_input = await Actor.get_input() or {}
-        # Default to washing machines as per your logs, but works for other categories too
         start_urls = actor_input.get("startUrls", [{"url": "https://eprel.ec.europa.eu/screen/product/washingmachines2019"}])
-        max_results = actor_input.get("maxResults", 100)
+        
+        # Force maxResults to be an integer
+        max_results = int(actor_input.get("maxResults", 50))
 
-        Actor.log.info(f"Starting EPREL Visual Scraper for {len(start_urls)} URLs.")
+        Actor.log.info(f"Starting EPREL Visual Scraper. Target: {max_results} items.")
 
         actor_env = Actor.get_env()
 
@@ -25,7 +26,6 @@ async def main():
                 args=["--no-sandbox", "--disable-setuid-sandbox"]
             )
             
-            # Create context with a standard user agent to avoid bot detection
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
@@ -44,45 +44,55 @@ async def main():
                     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     
                     # 3. Wait for the Angular App to load the cards
-                    # We wait for the card container component found in your HTML
                     try:
                         await page.wait_for_selector("app-search-result-card", timeout=30000)
+                        # Small extra wait to ensure text content inside cards is hydrated
+                        await page.wait_for_timeout(2000) 
                     except Exception:
                         Actor.log.warning(f"No product cards found at {url}")
                         continue
 
-                    # 4. Scrape the current page until max_results is reached
+                    # 4. Scrape the current page
                     while scraped_count < max_results:
-                        # Get all product cards visible on the current page
+                        # Get all product cards
                         cards = await page.locator("app-search-result-card").all()
                         Actor.log.info(f"Found {len(cards)} cards on current page.")
 
-                        for card in cards:
+                        for i, card in enumerate(cards):
                             if scraped_count >= max_results:
+                                Actor.log.info(f"Reached max results ({max_results}). Stopping.")
                                 break
                             
-                            # Extract data from the card using the helper function
+                            # Extract data
                             product_data = await extract_card_data(card, page.url)
                             
                             if product_data:
                                 await Actor.push_data(product_data)
                                 scraped_count += 1
+                                # Log progress every 5 items to keep logs clean but informative
+                                if scraped_count % 5 == 0:
+                                    Actor.log.info(f"Progress: {scraped_count}/{max_results} items scraped.")
+                            else:
+                                Actor.log.warning(f"Failed to extract card {i} on this page.")
                         
+                        # Double check break condition after card loop
                         if scraped_count >= max_results:
                             break
 
-                        # 5. Handle Pagination (Click 'Next')
-                        # Selector based on HTML: <ecl-pagination-item class="...--next"> <a ...>
+                        # 5. Handle Pagination
+                        # Check for the next button
                         next_btn = page.locator(".ecl-pagination__item--next a").first
                         
                         if await next_btn.count() > 0 and await next_btn.is_visible():
-                            Actor.log.info("Navigating to next page...")
+                            Actor.log.info(f"Navigating to next page... (Currently scraped: {scraped_count})")
                             await next_btn.click()
-                            # Wait for the list to refresh (waiting for a card to be attached again is a simple check)
-                            await page.wait_for_timeout(2000) # Small buffer for Angular animation
+                            
+                            # Wait for the list to refresh. 
+                            # We wait for the spinner to disappear OR for cards to stabilize
+                            await page.wait_for_timeout(3000)
                             await page.wait_for_selector("app-search-result-card", timeout=30000)
                         else:
-                            Actor.log.info("No next page button found. Stopping pagination.")
+                            Actor.log.info("No next page button found or end of list. Stopping.")
                             break
 
                 except Exception as e:
@@ -93,32 +103,39 @@ async def main():
 
 async def extract_card_data(card: Locator, current_url: str) -> Dict[str, Any]:
     """
-    Extracts details directly from the listing card (Visual Scraping).
-    This matches the specific Angular HTML structure provided.
+    Extracts details directly from the listing card.
+    Includes verbose logging for debugging.
     """
     try:
-        # -- Brand --
-        # HTML: <eui-card-header-title ...> <span> AEG </span> ...
-        brand = await card.locator("eui-card-header-title").first.inner_text()
+        # Use specific classes from your HTML to be more robust
+        brand_loc = card.locator(".eui-card-header__title-container-title").first
+        model_loc = card.locator(".eui-card-header__title-container-subtitle").first
         
-        # -- Model Identifier --
-        # HTML: <eui-card-header-subtitle ...> LFED61844B... </eui-card-header-subtitle>
-        model_id = await card.locator("eui-card-header-subtitle").first.inner_text()
+        # Check if basic info exists
+        if await brand_loc.count() == 0:
+            Actor.log.warning("Skipping card: Brand element not found.")
+            return None
+
+        brand = (await brand_loc.inner_text()).strip()
         
-        # -- Energy Class --
-        # HTML: <app-energy-thumbnail> <img title="Energieklasse A" ...>
+        # Model might be empty sometimes, handle gracefully
+        model_id = "N/A"
+        if await model_loc.count() > 0:
+            model_id = (await model_loc.inner_text()).strip()
+
+        # Energy Class
         energy_class = "N/A"
+        # Try finding the image thumbnail which contains the class in the 'title' attribute
         img_locator = card.locator("app-energy-thumbnail img").first
         if await img_locator.count() > 0:
-            # The class is usually in the 'title' attribute, e.g. "Energieklasse A"
             title_attr = await img_locator.get_attribute("title")
             if title_attr:
-                # Clean string: "Energieklasse A" -> "A"
+                # Clean "Energieklasse A" -> "A"
                 energy_class = title_attr.replace("Energieklasse", "").replace("Energy class", "").strip()
 
-        # -- Technical Specifications --
-        # HTML: <app-parameter-item-new> contains <dt> (key) and <dd> (value)
+        # Technical Specs
         specs = {}
+        # The key/values are in <app-parameter-item-new> -> <dt> / <dd>
         param_rows = await card.locator("app-parameter-item-new").all()
         
         for row in param_rows:
@@ -128,22 +145,17 @@ async def extract_card_data(card: Locator, current_url: str) -> Dict[str, Any]:
             if await key_loc.count() > 0 and await val_loc.count() > 0:
                 key_text = (await key_loc.inner_text()).strip()
                 val_text = (await val_loc.inner_text()).strip()
-                # Clean up newlines in values (e.g., "85 x 60\n cm" -> "85 x 60 cm")
+                # Clean up newlines in values
                 val_text = " ".join(val_text.split())
                 if key_text:
                     specs[key_text] = val_text
 
-        # Generate a direct URL if possible (EPREL URLs usually follow a pattern)
-        # We try to infer it from the context or the inputs, but strictly scraping, 
-        # the card usually has a 'More details' button.
-        # We return the current listing URL as 'source_url' for reference.
-        
         actor_env = Actor.get_env()
         scraped_at = actor_env.started_at.isoformat() if actor_env.started_at else datetime.now(timezone.utc).isoformat()
 
         return {
-            "brand": brand.strip(),
-            "modelIdentifier": model_id.strip(),
+            "brand": brand,
+            "modelIdentifier": model_id,
             "energyClass": energy_class,
             "specifications": specs,
             "scrapedAt": scraped_at,
@@ -151,8 +163,8 @@ async def extract_card_data(card: Locator, current_url: str) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        # Log warning but don't crash the scraper
-        # await Actor.log.warning(f"Error extracting card: {e}") # Uncomment for verbose debug
+        # Log the specific error so we know why it failed
+        Actor.log.error(f"Error extracting card data: {str(e)}")
         return None
 
 if __name__ == "__main__":
