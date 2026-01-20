@@ -9,5 +9,57 @@
     "input": "./INPUT_SCHEMA.json",
     "readme": "./README.md",
     "minMemoryMbytes": 2048,
-    "maxMemoryMbytes": 4096
+    "maxMemoryMbytes": 4096,
+    "storages": {
+        "dataset": {
+            "actorSpecification": 1,
+            "title": "EPREL Product Data",
+            "description": "Energy efficiency data extracted from the EU EPREL database",
+            "views": {
+                "overview": {
+                    "title": "Overview",
+                    "description": "Product energy efficiency information with technical specifications",
+                    "transformation": {
+                        "fields": [
+                            "brand",
+                            "modelIdentifier",
+                            "energyClass",
+                            "sourceUrl",
+                            "specifications",
+                            "scrapedAt"
+                        ]
+                    },
+                    "display": {
+                        "component": "table",
+                        "properties": {
+                            "brand": {
+                                "label": "Brand",
+                                "format": "text"
+                            },
+                            "modelIdentifier": {
+                                "label": "Model ID",
+                                "format": "text"
+                            },
+                            "energyClass": {
+                                "label": "Energy Class",
+                                "format": "text"
+                            },
+                            "sourceUrl": {
+                                "label": "Product Link",
+                                "format": "link"
+                            },
+                            "specifications": {
+                                "label": "Specifications",
+                                "format": "object"
+                            },
+                            "scrapedAt": {
+                                "label": "Scraped At",
+                                "format": "date"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
