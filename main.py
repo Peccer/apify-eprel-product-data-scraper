@@ -3,28 +3,29 @@ from typing import Dict, Any, List
 from urllib.parse import urljoin
 from datetime import datetime, timezone
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page, Locator
 from apify import Actor
 
 async def main():
     async with Actor:
         # 1. Initialize input
         actor_input = await Actor.get_input() or {}
-        start_urls = actor_input.get("startUrls", [{"url": "https://eprel.ec.europa.eu/screen/product/refrigeratingappliances2019"}])
+        # Default to washing machines as per your logs, but works for other categories too
+        start_urls = actor_input.get("startUrls", [{"url": "https://eprel.ec.europa.eu/screen/product/washingmachines2019"}])
         max_results = actor_input.get("maxResults", 100)
 
-        Actor.log.info(f"Starting EPREL Scraper for {len(start_urls)} URLs.")
+        Actor.log.info(f"Starting EPREL Visual Scraper for {len(start_urls)} URLs.")
 
-        # Get the environment to check for headless mode
         actor_env = Actor.get_env()
 
         async with async_playwright() as p:
-            # 2. Setup browser and proxy
-            # REPLACED: Actor.config.headless -> actor_env.get('headless')
+            # 2. Setup browser
             browser = await p.chromium.launch(
-                headless=actor_env.get('headless', True)
+                headless=actor_env.get('headless', True),
+                args=["--no-sandbox", "--disable-setuid-sandbox"]
             )
             
+            # Create context with a standard user agent to avoid bot detection
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
@@ -37,41 +38,52 @@ async def main():
                     break
 
                 url = start_url_obj.get("url")
-                Actor.log.info(f"Processing source URL: {url}")
+                Actor.log.info(f"Processing URL: {url}")
 
                 try:
-                    # Navigate to the page
                     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     
-                    # Handle EPREL's dynamic loading
-                    if "/screen/product/" not in url:
-                        Actor.log.info("Interpreting URL as a search/listing page...")
-                        await page.wait_for_selector(".product-item-title", timeout=15000)
-                        
-                        product_links = await page.eval_on_selector_all(
-                            ".product-item-title a", 
-                            "(links) => links.map(a => a.href)"
-                        )
-                        Actor.log.info(f"Found {len(product_links)} products on list page.")
-                        
-                        for p_link in product_links:
+                    # 3. Wait for the Angular App to load the cards
+                    # We wait for the card container component found in your HTML
+                    try:
+                        await page.wait_for_selector("app-search-result-card", timeout=30000)
+                    except Exception:
+                        Actor.log.warning(f"No product cards found at {url}")
+                        continue
+
+                    # 4. Scrape the current page until max_results is reached
+                    while scraped_count < max_results:
+                        # Get all product cards visible on the current page
+                        cards = await page.locator("app-search-result-card").all()
+                        Actor.log.info(f"Found {len(cards)} cards on current page.")
+
+                        for card in cards:
                             if scraped_count >= max_results:
                                 break
                             
-                            # Navigate to individual product
-                            product_data = await scrape_product_page(page, p_link)
+                            # Extract data from the card using the helper function
+                            product_data = await extract_card_data(card, page.url)
+                            
                             if product_data:
                                 await Actor.push_data(product_data)
                                 scraped_count += 1
-                                Actor.log.info(f"Scraped {scraped_count}/{max_results}: {p_link}")
-                    
-                    else:
-                        # Direct product page
-                        product_data = await scrape_product_page(page, url)
-                        if product_data:
-                            await Actor.push_data(product_data)
-                            scraped_count += 1
-                            Actor.log.info(f"Scraped direct product {scraped_count}: {url}")
+                        
+                        if scraped_count >= max_results:
+                            break
+
+                        # 5. Handle Pagination (Click 'Next')
+                        # Selector based on HTML: <ecl-pagination-item class="...--next"> <a ...>
+                        next_btn = page.locator(".ecl-pagination__item--next a").first
+                        
+                        if await next_btn.count() > 0 and await next_btn.is_visible():
+                            Actor.log.info("Navigating to next page...")
+                            await next_btn.click()
+                            # Wait for the list to refresh (waiting for a card to be attached again is a simple check)
+                            await page.wait_for_timeout(2000) # Small buffer for Angular animation
+                            await page.wait_for_selector("app-search-result-card", timeout=30000)
+                        else:
+                            Actor.log.info("No next page button found. Stopping pagination.")
+                            break
 
                 except Exception as e:
                     Actor.log.error(f"Failed to process {url}: {str(e)}")
@@ -79,53 +91,68 @@ async def main():
             await browser.close()
             Actor.log.info(f"Scraping finished. Total items: {scraped_count}")
 
-async def scrape_product_page(page, url) -> Dict[str, Any]:
-    """Helper to extract details from a specific EPREL product page."""
+async def extract_card_data(card: Locator, current_url: str) -> Dict[str, Any]:
+    """
+    Extracts details directly from the listing card (Visual Scraping).
+    This matches the specific Angular HTML structure provided.
+    """
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        # EPREL uses Angular; wait for a specific element that appears late
-        await page.wait_for_selector(".product-model-identifier", timeout=20000)
+        # -- Brand --
+        # HTML: <eui-card-header-title ...> <span> AEG </span> ...
+        brand = await card.locator("eui-card-header-title").first.inner_text()
         
-        # Extract base info
-        model_id = await page.inner_text(".product-model-identifier") if await page.query_selector(".product-model-identifier") else "N/A"
-        supplier = await page.inner_text(".product-supplier-name") if await page.query_selector(".product-supplier-name") else "N/A"
+        # -- Model Identifier --
+        # HTML: <eui-card-header-subtitle ...> LFED61844B... </eui-card-header-subtitle>
+        model_id = await card.locator("eui-card-header-subtitle").first.inner_text()
         
-        # Extract Energy Class
-        energy_class = await page.get_attribute(".energy-label-box .energy-class", "class")
-        # Clean the energy class string (e.g., "energy-class A")
-        energy_class = energy_class.split()[-1] if energy_class else "N/A"
+        # -- Energy Class --
+        # HTML: <app-energy-thumbnail> <img title="Energieklasse A" ...>
+        energy_class = "N/A"
+        img_locator = card.locator("app-energy-thumbnail img").first
+        if await img_locator.count() > 0:
+            # The class is usually in the 'title' attribute, e.g. "Energieklasse A"
+            title_attr = await img_locator.get_attribute("title")
+            if title_attr:
+                # Clean string: "Energieklasse A" -> "A"
+                energy_class = title_attr.replace("Energieklasse", "").replace("Energy class", "").strip()
 
-        # Extract technical parameters from the table
-        params = {}
-        rows = await page.query_selector_all("tr")
-        for row in rows:
-            cells = await row.query_selector_all("td")
-            if len(cells) >= 2:
-                key = (await cells[0].inner_text()).strip()
-                val = (await cells[1].inner_text()).strip()
-                if key:
-                    params[key] = val
-
-        # Extract Document Links
-        pis_link = await page.get_attribute("a[href*='productInformationSheet']", "href")
-        label_link = await page.get_attribute("a[href*='energyLabel']", "href")
+        # -- Technical Specifications --
+        # HTML: <app-parameter-item-new> contains <dt> (key) and <dd> (value)
+        specs = {}
+        param_rows = await card.locator("app-parameter-item-new").all()
         
-        # REPLACED: Actor.config.start_at -> actor_env.started_at
+        for row in param_rows:
+            key_loc = row.locator("dt")
+            val_loc = row.locator("dd")
+            
+            if await key_loc.count() > 0 and await val_loc.count() > 0:
+                key_text = (await key_loc.inner_text()).strip()
+                val_text = (await val_loc.inner_text()).strip()
+                # Clean up newlines in values (e.g., "85 x 60\n cm" -> "85 x 60 cm")
+                val_text = " ".join(val_text.split())
+                if key_text:
+                    specs[key_text] = val_text
+
+        # Generate a direct URL if possible (EPREL URLs usually follow a pattern)
+        # We try to infer it from the context or the inputs, but strictly scraping, 
+        # the card usually has a 'More details' button.
+        # We return the current listing URL as 'source_url' for reference.
+        
         actor_env = Actor.get_env()
         scraped_at = actor_env.started_at.isoformat() if actor_env.started_at else datetime.now(timezone.utc).isoformat()
 
         return {
-            "url": url,
+            "brand": brand.strip(),
             "modelIdentifier": model_id.strip(),
-            "supplierName": supplier.strip(),
             "energyClass": energy_class,
-            "productInformationSheet": urljoin(url, pis_link) if pis_link else None,
-            "energyLabelPdf": urljoin(url, label_link) if label_link else None,
-            "specifications": params,
-            "scrapedAt": scraped_at
+            "specifications": specs,
+            "scrapedAt": scraped_at,
+            "sourceUrl": current_url
         }
+
     except Exception as e:
-        Actor.log.warning(f"Could not scrape product {url}: {str(e)}")
+        # Log warning but don't crash the scraper
+        # await Actor.log.warning(f"Error extracting card: {e}") # Uncomment for verbose debug
         return None
 
 if __name__ == "__main__":
