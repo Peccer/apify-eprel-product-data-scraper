@@ -63,12 +63,22 @@ async def main():
                             if scraped_count >= max_results:
                                 Actor.log.info(f"Reached max results ({max_results}). Stopping.")
                                 break
-                            
+
                             # Extract data
                             product_data = await extract_card_data(card, page.url)
-                            
+
                             if product_data:
                                 await Actor.push_data(product_data)
+
+                                # Charge for the scraped product
+                                charge_result = await Actor.charge(event_name="product-scraped")
+
+                                # Check if user's spending limit has been reached
+                                if charge_result.event_charge_limit_reached:
+                                    Actor.log.info(f"User's spending limit reached. Stopping after {scraped_count + 1} items.")
+                                    scraped_count += 1
+                                    break
+
                                 scraped_count += 1
                                 if scraped_count % 5 == 0:
                                     Actor.log.info(f"Progress: {scraped_count}/{max_results} items scraped.")
@@ -80,17 +90,21 @@ async def main():
 
                         # 5. Handle Pagination
                         next_btn = page.locator(".ecl-pagination__item--next a").first
-                        
+
                         if await next_btn.count() > 0 and await next_btn.is_visible():
                             Actor.log.info(f"Navigating to next page... (Currently scraped: {scraped_count})")
                             await next_btn.click()
-                            
+
                             # Wait for list refresh
                             await page.wait_for_timeout(3000)
                             await page.wait_for_selector("app-search-result-card", timeout=30000)
                         else:
                             Actor.log.info("No next page button found or end of list. Stopping.")
                             break
+
+                    # Check if we should stop due to spending limit
+                    if scraped_count >= max_results:
+                        break
 
                 except Exception as e:
                     Actor.log.error(f"Failed to process {url}: {str(e)}")

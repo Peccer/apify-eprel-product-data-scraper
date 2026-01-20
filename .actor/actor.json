@@ -10,6 +10,12 @@
     "readme": "./README.md",
     "minMemoryMbytes": 2048,
     "maxMemoryMbytes": 4096,
+    "pricing": {
+        "pricingModel": "PAY_PER_EVENT",
+        "pricePerEvent": {
+            "product-scraped": 0.01
+        }
+    },
     "storages": {
         "dataset": {
             "actorSpecification": 1,
